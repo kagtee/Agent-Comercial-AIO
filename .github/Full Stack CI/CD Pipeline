@@ -1,0 +1,461 @@
+name: Full Stack CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # Allow manual triggers
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  NODE_VERSION: '20.x'
+  DOTNET_VERSION: '8.0.x'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ========== SETUP & VALIDATION ==========
+  validate:
+    name: Code Validation
+    runs-on: ubuntu-latest
+    outputs:
+      is_valid: ${{ steps.validate.outputs.result }}
+      version_tag: ${{ steps.version.outputs.tag }}
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        ref: ${{ github.event.pull_request.head.sha || github.sha }}
+    
+    # Dynamic version detection from package files
+    - name: Detect Project Versions
+      id: version
+      run: |
+        # Check Node.js version from package.json
+        if [ -f "package.json" ]; then
+          NODE_VER=$(node -p "require('./package.json').version || '1.0.0'")
+          echo "node_version=$NODE_VER" >> $GITHUB_OUTPUT
+        fi
+        
+        # Check .NET version from csproj
+        if [ -f "*.csproj" ]; then
+          DOTNET_VER=$(grep -oP '<TargetFramework>\K[^<]+' *.csproj | head -1)
+          echo "dotnet_version=$DOTNET_VER" >> $GITHUB_OUTPUT
+        fi
+        
+        # Generate deployment tag
+        TAG="${GITHUB_SHA:0:8}-$(date +%Y%m%d-%H%M)"
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+    
+    # Advanced Node.js setup with caching
+    - name: Setup Node.js Environment
+      uses: actions/setup-node@v6
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        node-version-file: '.nvmrc' # Optional: reads from .nvmrc if exists
+        architecture: 'x64'
+        check-latest: true
+        cache: 'npm'
+        cache-dependency-path: '**/package-lock.json'
+        registry-url: 'https://registry.npmjs.org/'
+        scope: '@kagtee'
+        # token: ${{ secrets.NPM_TOKEN }} # Optional for private registries
+    
+    # Advanced .NET setup with caching
+    - name: Setup .NET Core SDK
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        dotnet-quality: 'ga'
+        global-json-file: './global.json' # Optional: specify location
+        source-url: 'https://api.nuget.org/v3/index.json'
+        cache: true
+        cache-dependency-path: '**/packages.lock.json'
+    
+    - name: Validate Environment
+      id: validate
+      run: |
+        echo "Validating build environment..."
+        
+        # Check Node.js
+        node --version
+        npm --version
+        
+        # Check .NET
+        dotnet --version
+        dotnet --info
+        
+        # Check essential tools
+        git --version
+        docker --version
+        
+        echo "✅ Environment validation passed"
+        echo "result=success" >> $GITHUB_OUTPUT
+
+  # ========== QUALITY CHECKS ==========
+  quality:
+    name: Code Quality
+    needs: validate
+    runs-on: ubuntu-latest
+    if: needs.validate.outputs.is_valid == 'success'
+    
+    strategy:
+      matrix:
+        include:
+          - language: node
+            command: npm run lint
+          - language: dotnet
+            command: dotnet format --verify-no-changes
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      if: matrix.language == 'node'
+      uses: actions/setup-node@v6
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+    
+    - name: Setup .NET
+      if: matrix.language == 'dotnet'
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+    
+    - name: Install Dependencies
+      if: matrix.language == 'node'
+      run: npm ci
+    
+    - name: Restore Dependencies
+      if: matrix.language == 'dotnet'
+      run: dotnet restore
+    
+    - name: Run Quality Check
+      run: ${{ matrix.command }}
+
+  # ========== TESTING ==========
+  test:
+    name: Run Tests
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    if: needs.validate.outputs.is_valid == 'success'
+    
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node-version: [18.x, 20.x]
+        dotnet-version: ['6.0.x', '8.0.x']
+        include:
+          - os: ubuntu-latest
+            coverage: true
+          - os: windows-latest
+            coverage: false
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js for Testing
+      uses: actions/setup-node@v6
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    
+    - name: Setup .NET for Testing
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: ${{ matrix.dotnet-version }}
+    
+    - name: Install Node.js Dependencies
+      run: npm ci
+    
+    - name: Restore .NET Dependencies
+      run: dotnet restore
+    
+    - name: Run Node.js Tests
+      run: |
+        npm test
+        if [ "${{ matrix.coverage }}" = "true" ]; then
+          npm run coverage
+        fi
+    
+    - name: Run .NET Tests
+      run: |
+        dotnet test --verbosity normal --logger "trx"
+        if [ "${{ matrix.coverage }}" = "true" ]; then
+          dotnet test --collect:"XPlat Code Coverage"
+        fi
+    
+    - name: Upload Test Results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.os }}-${{ matrix.node-version }}
+        path: |
+          **/test-results/**/*.trx
+          **/coverage/**/*
+        retention-days: 7
+
+  # ========== BUILD & PACKAGE ==========
+  build:
+    name: Build & Package
+    needs: [validate, quality, test]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup Node.js for Build
+      uses: actions/setup-node@v6
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        registry-url: 'https://registry.npmjs.org/'
+    
+    - name: Setup .NET for Build
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        cache: true
+    
+    - name: Build Node.js Application
+      run: |
+        npm ci
+        npm run build
+        # Create Node.js package
+        npm pack
+        echo "NODE_PACKAGE=$(ls *.tgz)" >> $GITHUB_ENV
+    
+    - name: Build .NET Application
+      run: |
+        dotnet restore
+        dotnet build --configuration Release --no-restore
+        dotnet publish --configuration Release --output ./publish
+    
+    - name: Create Docker Images
+      env:
+        TAG: ${{ needs.validate.outputs.version_tag }}
+      run: |
+        # Build Node.js Docker image
+        docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-node:$TAG -f Dockerfile.node .
+        
+        # Build .NET Docker image
+        docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-dotnet:$TAG -f Dockerfile.dotnet .
+    
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-artifacts
+        path: |
+          *.tgz
+          publish/
+          dist/
+        retention-days: 30
+
+  # ========== SECURITY SCAN ==========
+  security:
+    name: Security Scan
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    
+    - name: Run SAST Scan
+      uses: github/codeql-action/init@v2
+      with:
+        languages: javascript, csharp
+    
+    - name: Analyze Code
+      uses: github/codeql-action/analyze@v2
+    
+    - name: Dependency Vulnerability Scan
+      run: |
+        # Node.js vulnerabilities
+        npm audit --audit-level=high || true
+        
+        # .NET vulnerabilities
+        dotnet list package --vulnerable --include-transitive || true
+    
+    - name: Container Security Scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+  # ========== DEPLOYMENT ==========
+  deploy:
+    name: Deploy to Environment
+    needs: [build, security]
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'staging' }}
+    
+    steps:
+    - name: Download Build Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: build-artifacts
+    
+    - name: Configure Deployment Environment
+      run: |
+        echo "Deploying to: ${{ github.event.inputs.environment || 'staging' }}"
+        echo "Version: ${{ needs.validate.outputs.version_tag }}"
+        
+        # Set environment-specific variables
+        if [ "${{ github.event.inputs.environment }}" = "production" ]; then
+          echo "RELEASE_NOTES=true" >> $GITHUB_ENV
+          echo "AUTO_SCALING=true" >> $GITHUB_ENV
+        else
+          echo "RELEASE_NOTES=false" >> $GITHUB_ENV
+          echo "AUTO_SCALING=false" >> $GITHUB_ENV
+        fi
+    
+    - name: Deploy to Google Cloud Run (Node.js)
+      if: env.RELEASE_NOTES == 'true'
+      env:
+        GCP_SA_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+      run: |
+        echo "$GCP_SA_KEY" > gcp-key.json
+        gcloud auth activate-service-account --key-file=gcp-key.json
+        gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+        
+        # Deploy Node.js service
+        gcloud run deploy node-service \
+          --image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-node:${{ needs.validate.outputs.version_tag }} \
+          --region us-central1 \
+          --platform managed \
+          --allow-unauthenticated \
+          --memory 512Mi \
+          --cpu 1
+    
+    - name: Deploy to AWS ECS (.NET)
+      if: env.AUTO_SCALING == 'true'
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        AWS_REGION: ${{ secrets.AWS_REGION }}
+      run: |
+        # Configure AWS CLI
+        aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+        aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+        aws configure set region $AWS_REGION
+        
+        # Update ECS service
+        aws ecs update-service \
+          --cluster ${{ secrets.AWS_ECS_CLUSTER }} \
+          --service ${{ secrets.AWS_ECS_SERVICE }} \
+          --force-new-deployment \
+          --region $AWS_REGION
+    
+    - name: Run Post-Deployment Tests
+      run: |
+        # Health check
+        sleep 30  # Wait for deployment to stabilize
+        
+        # Test Node.js endpoint
+        if [ "${{ env.RELEASE_NOTES }}" = "true" ]; then
+          curl -f https://node-service-url/health || exit 1
+        fi
+        
+        # Test .NET endpoint
+        if [ "${{ env.AUTO_SCALING }}" = "true" ]; then
+          curl -f https://dotnet-service-url/health || exit 1
+        fi
+    
+    - name: Create GitHub Release
+      if: github.event.inputs.environment == 'production' && success()
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ needs.validate.outputs.version_tag }}
+        name: Release ${{ needs.validate.outputs.version_tag }}
+        body: |
+          Automated deployment to production
+          
+          **Changes:**
+          - Node.js: ${{ needs.validate.outputs.node_version }}
+          - .NET: ${{ needs.validate.outputs.dotnet_version }}
+          - Build: ${{ github.sha }}
+        draft: false
+        prerelease: false
+        files: |
+          *.tgz
+          publish/**/*
+
+  # ========== NOTIFICATION & CLEANUP ==========
+  notify:
+    name: Send Notifications
+    needs: [deploy, security]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Determine Workflow Status
+      id: status
+      run: |
+        if ${{ needs.deploy.result == 'success' && needs.security.result == 'success' }}; then
+          echo "result=success" >> $GITHUB_OUTPUT
+          echo "message=✅ Deployment completed successfully!" >> $GITHUB_OUTPUT
+        elif ${{ needs.deploy.result == 'failure' || needs.security.result == 'failure' }}; then
+          echo "result=failure" >> $GITHUB_OUTPUT
+          echo "message=❌ Deployment failed. Check logs." >> $GITHUB_OUTPUT
+        else
+          echo "result=cancelled" >> $GITHUB_OUTPUT
+          echo "message=⚠️ Deployment was cancelled." >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Send Slack Notification
+      uses: slackapi/slack-github-action@v1
+      with:
+        channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+        slack-message: |
+          ${{ steps.status.outputs.message }}
+          *Repository:* ${{ github.repository }}
+          *Environment:* ${{ github.event.inputs.environment || 'staging' }}
+          *Commit:* ${{ github.sha }}
+          *Workflow:* ${{ github.workflow }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+    
+    - name: Cleanup Old Artifacts
+      if: success()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const artifacts = await github.rest.actions.listArtifactsForRepo({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            per_page: 100
+          });
+          
+          // Delete artifacts older than 30 days
+          const thirtyDaysAgo = new Date();
+          thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+          
+          for (const artifact of artifacts.data.artifacts) {
+            if (new Date(artifact.created_at) < thirtyDaysAgo) {
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id
+              });
+              console.log(`Deleted artifact: ${artifact.name}`);
+            }
+          }
