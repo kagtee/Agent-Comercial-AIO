@@ -125,7 +125,7 @@ jobs:
       # Step 7: Upload test results and coverage
       - name: Upload Test Results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v6
         with:
           name: test-results-${{ matrix.os }}-${{ matrix.node-version }}
           path: |
@@ -232,7 +232,7 @@ jobs:
 
       # Step 6: Upload build artifacts
       - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v6
         with:
           name: sdk-package-${{ github.sha }}
           path: |
