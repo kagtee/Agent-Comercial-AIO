@@ -1,0 +1,43 @@
+# .github/workflows/quick-deploy.yml (Simplified version)
+name: Quick Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_id:
+        description: 'PR Number to deploy'
+        required: false
+        type: string
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  deploy-pr:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout PR
+      if: github.event.inputs.pr_id != ''
+      run: |
+        gh pr checkout ${{ github.event.inputs.pr_id }}
+      
+    - name: Setup Environments
+      uses: actions/setup-node@v6
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+        
+    - uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: '8.0.x'
+        
+    - name: Deploy
+      run: |
+        echo "Deploying to ${{ github.event.inputs.environment }}"
+        # Your deployment commands here
