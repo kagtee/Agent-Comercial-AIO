@@ -1,46 +1,442 @@
-            - name: Setup Node.js environment
-  uses: actions/setup-node@v6.1.0
-  with:
-    # Version Spec of the version to use. Examples: 12.x, 10.15.1, >=10.15.0.
-    node-version: # optional
-    # File containing the version Spec of the version to use.  Examples: package.json, .nvmrc, .node-version, .tool-versions.
-    node-version-file: # optional
-    # Target architecture for Node to use. Examples: x86, x64. Will use system architecture by default.
-    architecture: # optional
-    # Set this option if you want the action to check for the latest available version that satisfies the version spec.
-    check-latest: # optional
-    # Optional registry to set up for auth. Will set the registry in a project level .npmrc and .yarnrc file, and set up auth to read in from env.NODE_AUTH_TOKEN.
-    registry-url: # optional
-    # Optional scope for authenticating against scoped registries. Will fall back to the repository owner when using the GitHub Packages registry (https://npm.pkg.github.com/).
-    scope: # optional
-    # Used to pull node distributions from node-versions. Since there's a default, this is typically not supplied by the user. When running this action on github.com, the default value is sufficient. When running on GHES, you can pass a personal access token for github.com if you are experiencing rate limiting.
-    token: # optional, default is ${{ github.server_url == 'https://github.com' && github.token || '' }}
-    # Used to specify a package manager for caching in the default directory. Supported values: npm, yarn, pnpm.
-    cache: # optional
-    # Set to false to disable automatic caching. By default, caching is enabled when either devEngines.packageManager or the top-level packageManager field in package.json specifies npm as the package manager.
-    package-manager-cache: # optional, default is true
-    # Used to specify the path to a dependency file: package-lock.json, yarn.lock, etc. Supports wildcards or a list of file names for caching multiple dependencies.
-    cache-dependency-path: # optional
-    # Used to specify an alternative mirror to downlooad Node.js binaries from
-    mirror: # optional
-    # The token used as Authorization header when fetching from the mirror
-    mirror-token: # optional
-                      - name: Setup .NET Core SDK
-  uses: actions/setup-dotnet@v5.0.1
-  with:
-    # Optional SDK version(s) to use. If not provided, will install global.json version when available. Examples: 2.2.104, 3.1, 3.1.x, 3.x, 6.0.2xx
-    dotnet-version: # optional
-    # Optional quality of the build. The possible values are: daily, signed, validated, preview, ga.
-    dotnet-quality: # optional
-    # Optional global.json location, if your global.json isn't located in the root of the repo.
-    global-json-file: # optional
-    # Optional package source for which to set up authentication. Will consult any existing NuGet.config in the root of the repo and provide a temporary NuGet.config using the NUGET_AUTH_TOKEN environment variable as a ClearTextPassword
-    source-url: # optional
-    # Optional OWNER for using packages from GitHub Package Registry organizations/users other than the current repository's owner. Only used if a GPR URL is also provided in source-url
-    owner: # optional
-    # Optional NuGet.config location, if your NuGet.config isn't located in the root of the repo.
-    config-file: # optional
-    # Optional input to enable caching of the NuGet global-packages folder
-    cache: # optional
-    # Used to specify the path to a dependency file: packages.lock.json. Supports wildcards or a list of file names for caching multiple dependencies.
-    cache-dependency-path: # optional
+   # .github/workflows/Core_SDK_node.yml
+name: Core SDK Node.js CI/CD
+
+# --- TRIGGERS ---
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/**'           # Trigger on source code changes
+      - 'package.json'     # Trigger on dependency changes
+      - '.github/workflows/Core_SDK_node.yml' # Trigger on workflow changes
+  pull_request:
+    branches: [main]
+  release:
+    types: [published, created] # Trigger on new GitHub Releases
+  workflow_dispatch:       # Allow manual trigger from the GitHub UI
+    inputs:
+      publish_type:
+        description: 'Publish type for npm'
+        required: false
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - prerelease
+          - custom
+
+# --- ENVIRONMENT VARIABLES ---
+env:
+  NODE_VERSION: '20.x'     # Primary Node.js version
+  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+  REGISTRY_URL: 'https://registry.npmjs.org/'
+  TEST_TIMEOUT: 30000      # Jest timeout in ms
+
+# --- JOBS ---
+jobs:
+  # JOB 1: Validate and Test
+  validate-and-test:
+    name: Validate Code & Run Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x, 21.x] # Test across multiple Node versions
+        os: [ubuntu-latest, windows-latest] # Test across different OS
+    outputs:
+      test-summary: ${{ steps.test-coverage.outputs.summary }}
+      lint-status: ${{ steps.run-linter.outputs.status }}
+
+    steps:
+      # Step 1: Checkout code
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for full git context
+
+      # Step 2: Setup Node.js with advanced configuration
+      - name: Setup Node.js ${{ matrix.node-version }}
+        id: setup-node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          node-version-file: '.nvmrc'  # Optional: Read version from .nvmrc
+          architecture: 'x64'
+          check-latest: true           # Always check for latest patch
+          cache: 'npm'                 # Enable npm caching
+          cache-dependency-path: '**/package-lock.json'
+          registry-url: ${{ env.REGISTRY_URL }}
+          scope: '@your-scope'         # Optional: For scoped packages
+          # token: ${{ secrets.GITHUB_TOKEN }} # Only needed for GHES
+
+      # Step 3: Cache node_modules for faster builds
+      - name: Cache Node Modules
+        uses: actions/cache@v3
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node-${{ matrix.node-version }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ matrix.node-version }}-
+            ${{ runner.os }}-node-
+
+      # Step 4: Install dependencies
+      - name: Install Dependencies
+        run: |
+          npm ci --audit=false
+          npm list --depth=0  # Show installed packages
+
+      # Step 5: Lint and Type Check
+      - name: Lint and Type Check
+        id: run-linter
+        run: |
+          echo "Running ESLint..."
+          npx eslint src/ --max-warnings 0
+          echo "Running TypeScript compiler check..."
+          npx tsc --noEmit --project tsconfig.json
+          echo "status=passed" >> $GITHUB_OUTPUT
+
+      # Step 6: Run tests with coverage
+      - name: Run Tests with Coverage
+        id: test-coverage
+        env:
+          NODE_ENV: test
+          CI: true
+        run: |
+          echo "Running test suite..."
+          
+          # Run unit tests
+          npm test -- --coverage --testTimeout=${{ env.TEST_TIMEOUT }}
+          
+          # Run integration tests if they exist
+          if [ -f "scripts/test-integration.js" ]; then
+            npm run test:integration
+          fi
+          
+          # Generate test summary
+          TEST_RESULT=$?
+          COVERAGE=$(cat coverage/coverage-summary.json | jq -r '.total.lines.pct')
+          echo "summary=Tests: $TEST_RESULT, Coverage: ${COVERAGE}%" >> $GITHUB_OUTPUT
+          
+          if [ $TEST_RESULT -ne 0 ]; then
+            exit 1
+          fi
+
+      # Step 7: Upload test results and coverage
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.node-version }}
+          path: |
+            coverage/
+            junit.xml
+            test-report.json
+          retention-days: 30
+
+      # Step 8: Security audit
+      - name: Security Audit
+        run: |
+          npm audit --production --audit-level=high || true
+          npx audit-ci --moderate --skip-dev
+
+  # JOB 2: Build and Package
+  build-and-package:
+    name: Build SDK Package
+    needs: validate-and-test
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'push' && 
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') &&
+      needs.validate-and-test.result == 'success'
+
+    outputs:
+      package-name: ${{ steps.build-package.outputs.package-name }}
+      version: ${{ steps.determine-version.outputs.version }}
+
+    steps:
+      # Step 1: Checkout
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Step 2: Setup Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: ${{ env.REGISTRY_URL }}
+
+      # Step 3: Determine version
+      - name: Determine Package Version
+        id: determine-version
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          
+          if [ "${{ github.event_name }}" = "release" ]; then
+            # Use release tag version
+            VERSION=${GITHUB_REF#refs/tags/v}
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "Using release version: $VERSION"
+          elif [ "${{ github.event.inputs.publish_type }}" != "" ]; then
+            # Manual version bump
+            PUBLISH_TYPE=${{ github.event.inputs.publish_type }}
+            if [ "$PUBLISH_TYPE" = "custom" ]; then
+              echo "Enter custom version (format: x.y.z):"
+              read CUSTOM_VERSION
+              VERSION=$CUSTOM_VERSION
+            else
+              # Auto-increment version
+              VERSION=$(npm version $PUBLISH_TYPE --no-git-tag-version)
+            fi
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          else
+            # Use current version with commit hash for dev builds
+            SHORT_SHA=${GITHUB_SHA:0:8}
+            VERSION="${CURRENT_VERSION}-dev.${SHORT_SHA}"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "Final version: $VERSION"
+
+      # Step 4: Build the package
+      - name: Build Package
+        id: build-package
+        run: |
+          # Install dependencies
+          npm ci
+          
+          # Build the SDK
+          npm run build
+          
+          # Update version in package.json
+          npm version ${{ steps.determine-version.outputs.version }} --no-git-tag-version --allow-same-version
+          
+          # Create tarball
+          npm pack
+          PACKAGE_NAME=$(ls *.tgz)
+          echo "package-name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+          echo "Created package: $PACKAGE_NAME"
+          
+          # Verify package contents
+          tar -tzf $PACKAGE_NAME | head -20
+
+      # Step 5: Generate documentation
+      - name: Generate Documentation
+        run: |
+          if [ -f "node_modules/.bin/typedoc" ]; then
+            npx typedoc --out docs/ --entryPoints src/index.ts
+            echo "Documentation generated"
+          else
+            echo "TypeDoc not found, skipping documentation"
+          fi
+
+      # Step 6: Upload build artifacts
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: sdk-package-${{ github.sha }}
+          path: |
+            *.tgz
+            dist/
+            docs/
+            package.json
+          retention-days: 90
+
+      # Step 7: Size check
+      - name: Check Bundle Size
+        run: |
+          PACKAGE_SIZE=$(stat -c%s *.tgz)
+          echo "Package size: $((PACKAGE_SIZE / 1024)) KB"
+          
+          if [ $PACKAGE_SIZE -gt 5242880 ]; then  # 5MB limit
+            echo "Warning: Package exceeds 5MB"
+          fi
+
+  # JOB 3: Publish to NPM
+  publish-to-npm:
+    name: Publish to NPM Registry
+    needs: build-and-package
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'release' || 
+       github.event_name == 'workflow_dispatch') &&
+      needs.build-and-package.result == 'success'
+    environment: production  # Requires environment protection
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      # Step 1: Download artifacts
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: sdk-package-${{ github.sha }}
+
+      # Step 2: Setup Node.js with NPM authentication
+      - name: Setup Node.js with NPM Auth
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: ${{ env.REGISTRY_URL }}
+          scope: '@your-scope'
+
+      # Step 3: Publish to NPM
+      - name: Publish Package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "Publishing ${{ needs.build-and-package.outputs.package-name }} to npm..."
+          
+          # Dry run first
+          npm publish --dry-run
+          
+          # Actual publish (conditional)
+          if [[ "${{ github.event_name }}" == "release" || 
+                "${{ github.event.inputs.publish_type }}" != "prerelease" ]]; then
+            npm publish --access public
+            echo "✅ Published to npm registry"
+          else
+            npm publish --tag beta --access public
+            echo "✅ Published as beta version"
+          fi
+          
+          # Verify publication
+          npm view ${{ needs.build-and-package.outputs.package-name }}
+
+      # Step 4: Create GitHub Release
+      - name: Create GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ needs.build-and-package.outputs.version }}
+          name: SDK v${{ needs.build-and-package.outputs.version }}
+          body: |
+            ## Core SDK Node.js Release v${{ needs.build-and-package.outputs.version }}
+            
+            ### 📦 Installation
+            ```bash
+            npm install @your-scope/core-sdk@${{ needs.build-and-package.outputs.version }}
+            ```
+            
+            ### 🔧 Changes
+            Automated release from CI/CD pipeline
+            
+            ### 📊 Test Coverage
+            ${{ needs.validate-and-test.outputs.test-summary }}
+            
+            ### 🏷️ Commit
+            ${{ github.sha }}
+          draft: false
+          prerelease: ${{ contains(github.event.release.tag_name, 'beta') || contains(github.event.release.tag_name, 'alpha') }}
+          files: |
+            *.tgz
+
+      # Step 5: Update CHANGELOG
+      - name: Update CHANGELOG
+        run: |
+          if [ ! -f "CHANGELOG.md" ]; then
+            echo "# Changelog" > CHANGELOG.md
+          fi
+          
+          cat >> CHANGELOG.md << EOF
+          
+          ## ${{ needs.build-and-package.outputs.version }} ($(date +%Y-%m-%d))
+          
+          ### Features
+          - Automated release
+          
+          ### Fixes
+          - CI/CD improvements
+          
+          ### Dependencies
+          - Updated dependencies
+          
+          EOF
+
+      # Step 6: Notify on Success
+      - name: Notify Success
+        if: success()
+        run: |
+          echo "✅ Core SDK v${{ needs.build-and-package.outputs.version }} published successfully!"
+          
+          # Optional: Send to Slack or other services
+          # curl -X POST -H 'Content-type: application/json' \
+          #   --data "{\"text\":\"SDK v${{ needs.build-and-package.outputs.version }} published to npm\"}" \
+          #   ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # JOB 4: Deploy Examples/Applications
+  deploy-examples:
+    name: Deploy Example Applications
+    needs: publish-to-npm
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    
+    strategy:
+      matrix:
+        example: ['basic-usage', 'advanced-integration', 'react-example']
+
+    steps:
+      - name: Checkout Examples Repository
+        uses: actions/checkout@v4
+        with:
+          repository: your-org/core-sdk-examples
+          path: examples
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Latest SDK
+        run: |
+          cd examples/${{ matrix.example }}
+          npm install @your-scope/core-sdk@${{ needs.build-and-package.outputs.version }}
+          npm ci
+
+      - name: Build and Deploy Example
+        run: |
+          cd examples/${{ matrix.example }}
+          npm run build
+          # Add deployment commands for your hosting platform
+          # Example: netlify, vercel, cloudflare pages, etc.
+
+  # JOB 5: Performance Regression Tests
+  performance-test:
+    name: Performance Regression Tests
+    needs: publish-to-npm
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    
+    steps:
+      - name: Install SDK
+        run: |
+          npm init -y
+          npm install @your-scope/core-sdk@${{ needs.build-and-package.outputs.version }}
+
+      - name: Run Performance Benchmarks
+        run: |
+          # Simple benchmark
+          node -e "
+            const SDK = require('@your-scope/core-sdk');
+            const start = Date.now();
+            const sdk = new SDK();
+            // Run some operations
+            for (let i = 0; i < 1000; i++) {
+              sdk.someMethod();
+            }
+            const duration = Date.now() - start;
+            console.log('Performance: ' + duration + 'ms for 1000 operations');
+            
+            if (duration > 1000) {
+              console.error('Performance regression detected!');
+              process.exit(1);
+            }
+          "
+
+# --- WORKFLOW-LEVEL SETTINGS ---
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true  # Cancel previous runs on new push     
