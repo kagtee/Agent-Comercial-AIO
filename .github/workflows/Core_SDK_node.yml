@@ -269,7 +269,7 @@ jobs:
     steps:
       # Step 1: Download artifacts
       - name: Download Build Artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v7
         with:
           name: sdk-package-${{ github.sha }}
 
