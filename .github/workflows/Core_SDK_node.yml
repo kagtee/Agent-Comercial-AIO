@@ -58,7 +58,7 @@ jobs:
       # Step 2: Setup Node.js with advanced configuration
       - name: Setup Node.js ${{ matrix.node-version }}
         id: setup-node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
           node-version-file: '.nvmrc'  # Optional: Read version from .nvmrc
@@ -161,7 +161,7 @@ jobs:
 
       # Step 2: Setup Node.js
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: ${{ env.REGISTRY_URL }}
@@ -275,7 +275,7 @@ jobs:
 
       # Step 2: Setup Node.js with NPM authentication
       - name: Setup Node.js with NPM Auth
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           registry-url: ${{ env.REGISTRY_URL }}
@@ -386,7 +386,7 @@ jobs:
           path: examples
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
